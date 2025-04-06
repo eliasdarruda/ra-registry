@@ -177,6 +177,31 @@ defmodule RaRegistry.StateMachine do
   end
 
   @doc """
+  Query functions for Ra's consistent_query.
+  These must follow the proper format of receiving machine state as a single argument.
+  """
+  def lookup_query_unique(key, machine_state) do
+    case machine_state.unique do
+      %{^key => {pid, value}} ->
+        {:ok, [{pid, value}]}
+
+      _ ->
+        {:ok, []}
+    end
+  end
+
+  def lookup_query_duplicate(key, machine_state) do
+    case machine_state.duplicate do
+      %{^key => entries} ->
+        result = for {pid, value} <- entries, do: {pid, value}
+        {:ok, result}
+
+      _ ->
+        {:ok, []}
+    end
+  end
+
+  @doc """
   Handle process monitors.
   """
   def handle_down(pid, _reason, state) do

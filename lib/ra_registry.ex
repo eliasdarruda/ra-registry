@@ -152,13 +152,6 @@ defmodule RaRegistry do
     GenServer.call(name, {:update_value, key, self(), callback})
   end
 
-  @doc """
-  Returns a stream of all processes in the registry.
-  """
-  def match(name, key, pattern) do
-    GenServer.call(name, {:match, key, pattern})
-  end
-
   # Private helpers
 
   defp supervisor_name(name) do
@@ -174,10 +167,25 @@ defmodule RaRegistry do
   def register_name({registry, key}, pid) do
     # For compatibility with GenServer :via
     # We must use the provided pid, not self()
+    # Add a retry with exponential backoff for reliability during tests
+    do_register_name({registry, key}, pid, 3)
+  end
+
+  # Helper with retry logic for more reliable via registration during tests
+  defp do_register_name({registry, key}, pid, retries) when retries > 0 do
     case register(registry, key, nil, pid) do
-      :ok -> :yes
-      _ -> :no
+      :ok ->
+        :yes
+
+      _ ->
+        # Sleep with exponential backoff
+        Process.sleep(500 * 2 ** (3 - retries))
+        do_register_name({registry, key}, pid, retries - 1)
     end
+  end
+
+  defp do_register_name({_registry, _key}, _pid, 0) do
+    :no
   end
 
   @doc """

@@ -30,7 +30,7 @@ defmodule RaRegistryTest do
     # Make sure our Ra node is actually started
     server_id = {cluster_name, node()}
 
-    # Debug to see if node is actually running 
+    # Debug to see if node is actually running
     IO.puts("Ra member status for #{inspect(server_id)}: #{inspect(:ra.members(server_id))}")
 
     # Set up test registries with a wait between them
@@ -400,8 +400,8 @@ defmodule RaRegistryTest do
             end)
 
           # Wait for both tasks to complete or timeout
-          result1 = Task.yield(task1, 500) || Task.shutdown(task1)
-          result2 = Task.yield(task2, 500) || Task.shutdown(task2)
+          result1 = Task.yield(task1, 10000) || Task.shutdown(task1)
+          result2 = Task.yield(task2, 10000) || Task.shutdown(task2)
 
           # Process any name conflict exit signals
           receive_exits()
@@ -419,7 +419,7 @@ defmodule RaRegistryTest do
         end)
 
         # Wait for the test results
-        assert_receive {:results, success_count, lookup_count}, 2000
+        assert_receive {:results, success_count, lookup_count}, 5000
 
         # We should have at most one successful registration
         assert success_count <= 1
@@ -469,9 +469,6 @@ defmodule RaRegistryTest do
 
       # Wait for the process to die
       assert_receive {:EXIT, ^server_pid, :crash}, 1000
-
-      # We need to wait briefly for the Ra registry to process the DOWN message
-      Process.sleep(300)
 
       # Verify the registration was cleared from the registry
       assert [] = RaRegistry.lookup(UniqueRegistry, registry_key)

@@ -6,8 +6,6 @@ defmodule RaRegistry.Manager do
 
   require Logger
 
-  @default_cluster_name :ra_registry_cluster
-
   def start_link(opts) do
     name = Keyword.fetch!(opts, :name)
     GenServer.start_link(__MODULE__, opts, name: name)
@@ -22,20 +20,6 @@ defmodule RaRegistry.Manager do
     GenServer.call(name, :get_members)
   end
 
-  @doc """
-  Adds a node to the Ra cluster.
-  """
-  def add_member(name, node) do
-    GenServer.call(name, {:add_member, node})
-  end
-
-  @doc """
-  Removes a node from the Ra cluster.
-  """
-  def remove_member(name, node) do
-    GenServer.call(name, {:remove_member, node})
-  end
-
   # Server callbacks
 
   @impl true
@@ -46,18 +30,10 @@ defmodule RaRegistry.Manager do
     # Extract options
     keys = Keyword.fetch!(opts, :keys)
     name = Keyword.fetch!(opts, :name)
+    nodes = Node.list() ++ [Node.self()]
+    ra_config = Keyword.get(opts, :ra_config, %{})
 
-    # Registry should already be started by the application
-
-    # Get cluster configuration
-    cluster_name =
-      Keyword.get(
-        opts,
-        :cluster_name,
-        Application.get_env(:ra_registry, :cluster_name, @default_cluster_name)
-      )
-
-    nodes = Keyword.get(opts, :nodes, Node.list() ++ [Node.self()])
+    cluster_name = :"#{name}.RaCluster"
 
     # Each server needs a unique ID in the format {name, node}
     server_ids =
@@ -79,22 +55,24 @@ defmodule RaRegistry.Manager do
     machine = RaRegistry.StateMachine.machine_config()
 
     # Setup recurring health check timer
-    Process.send_after(self(), :check_cluster_health, 10_000)
+    Process.send_after(self(), :check_cluster_health, 11_000)
 
     # Ra configuration
     # 1) Increase default timeout to allow for more time
     # 2) Decrease election timeout for faster leader election after failures
     # 3) Configure max append entries batch size for better throughput
-    ra_config = %{
-      # Default timeout for operations (10s)
-      default_timeout: 10_000,
-      # Min/max election timeout (significantly decreased from default to handle SIGKILL scenarios)
-      election_timeout: [500, 1000],
-      # How often to send heartbeats (500ms for more aggressive leader detection)
-      heartbeat_timeout: 500,
-      # Max number of entries to replicate at once
-      max_append_entries_batch_size: 64
-    }
+    ra_config =
+      %{
+        # Default timeout for operations (5s)
+        default_timeout: 5_000,
+        # Min/max election timeout (significantly decreased from default to handle SIGKILL scenarios)
+        election_timeout: [500, 1000],
+        # How often to send heartbeats (500ms for more aggressive leader detection)
+        heartbeat_timeout: 500,
+        # Max number of entries to replicate at once
+        max_append_entries_batch_size: 64
+      }
+      |> Map.merge(ra_config)
 
     # Apply Ra config
     for {key, value} <- ra_config do
@@ -179,36 +157,6 @@ defmodule RaRegistry.Manager do
   end
 
   @impl true
-  def handle_call({:add_member, node}, _from, state) do
-    new_member = {state.cluster_name, node}
-    existing_member = {state.cluster_name, node()}
-
-    case :ra.add_member(existing_member, new_member) do
-      {:ok, _, _} ->
-        {:reply, :ok, %{state | members: [new_member | state.members]}}
-
-      error ->
-        Logger.error("Failed to add member #{inspect(node)}: #{inspect(error)}")
-        {:reply, {:error, error}, state}
-    end
-  end
-
-  @impl true
-  def handle_call({:remove_member, node}, _from, state) do
-    member = {state.cluster_name, node}
-    existing_member = {state.cluster_name, node()}
-
-    case :ra.remove_member(existing_member, member) do
-      {:ok, _, _} ->
-        {:reply, :ok, %{state | members: Enum.reject(state.members, fn m -> m == member end)}}
-
-      error ->
-        Logger.error("Failed to remove member #{inspect(node)}: #{inspect(error)}")
-        {:reply, {:error, error}, state}
-    end
-  end
-
-  @impl true
   def handle_call({:register, key, pid, value}, _from, state) do
     # Get the current monitored processes map or initialize it
     monitored_pids = Map.get(state, :monitored_pids, %{})
@@ -216,15 +164,9 @@ defmodule RaRegistry.Manager do
     try do
       leader_id = get_leader(state)
 
-      # Use a timeout to prevent getting stuck on dead nodes
-      task =
-        Task.async(fn ->
-          :ra.process_command(leader_id, {:register, key, pid, value, state.keys})
-        end)
-
       # Reduced timeout to fail faster
-      case Task.yield(task, 15000) do
-        {:ok, {:ok, :ok, _}} ->
+      case :ra.process_command(leader_id, {:register, key, pid, value, state.keys}) do
+        {:ok, :ok, _} ->
           # Set up monitoring for this process if we're not already monitoring it
           updated_state =
             if !Map.has_key?(monitored_pids, pid) do
@@ -238,10 +180,16 @@ defmodule RaRegistry.Manager do
 
           {:reply, :ok, updated_state}
 
-        {:ok, {:ok, {:error, :already_registered}, _}} ->
+        {:ok, {:error, :already_registered}, _} ->
           {:reply, {:error, :already_registered}, state}
 
-        {:ok, error} ->
+        nil ->
+          Logger.warning("COMMAND TIMEOUT - Cluster appears stuck, initiating emergency recovery")
+
+          # Fall back to another member while recovery happens
+          retry_with_fallback_member(key, pid, value, state)
+
+        error ->
           # Try to recover the cluster if we get a timeout or leadership issue
           if is_timeout_error(error) do
             Logger.warning(
@@ -263,14 +211,6 @@ defmodule RaRegistry.Manager do
           else
             {:reply, {:error, error}, state}
           end
-
-        nil ->
-          # Task timed out - THIS IS CRITICAL FOR SIGKILL SCENARIOS
-          Task.shutdown(task)
-          Logger.warning("COMMAND TIMEOUT - Cluster appears stuck, initiating emergency recovery")
-
-          # Fall back to another member while recovery happens
-          retry_with_fallback_member(key, pid, value, state)
       end
     rescue
       error ->
@@ -285,7 +225,6 @@ defmodule RaRegistry.Manager do
 
   @impl true
   def handle_call({:unregister, key, pid}, _from, state) do
-    dbg({"unregister", key: key, pid: pid, state: state})
     server_id = {state.cluster_name, node()}
 
     try do
@@ -321,67 +260,9 @@ defmodule RaRegistry.Manager do
 
   @impl true
   def handle_call({:lookup, key}, _from, state) do
-    server_id = {state.cluster_name, node()}
+    results = do_lookup(key, state)
 
-    try do
-      # Try to find the leader for more reliable reads
-      leader_id = get_leader(state) || server_id
-
-      # First try with the leader if available
-      case :ra.process_command(leader_id, {:lookup, key, state.keys}) do
-        {:ok, {:ok, results}, _} ->
-          {:reply, results, state}
-
-        error ->
-          Logger.debug("Leader lookup failed: #{inspect(error)}, trying consistent query")
-
-          # For read-only queries, we can also try consistent_query
-          case :ra.consistent_query(server_id, {:lookup, key, state.keys}) do
-            {:ok, {:ok, results}} ->
-              {:reply, results, state}
-
-            {:ok, {:ok, results}, _} ->
-              {:reply, results, state}
-
-            error2 ->
-              Logger.debug(
-                "Consistent query also failed: #{inspect(error2)}, trying to force election"
-              )
-
-              # Return empty results for now
-              {:reply, [], state}
-          end
-      end
-    rescue
-      error ->
-        Logger.debug("Exception during lookup: #{inspect(error)}, trying with fallback")
-        # Try with another cluster member if available
-        if state.members != [] and state.members != [server_id] do
-          other_members = Enum.reject(state.members, fn m -> m == server_id end)
-
-          # Try each member in sequence until one responds
-          result =
-            Enum.find_value(other_members, [], fn member ->
-              try do
-                case :ra.consistent_query(member, {:lookup, key, state.keys}) do
-                  {:ok, {:ok, results}} -> results
-                  {:ok, {:ok, results}, _} -> results
-                  _ -> nil
-                end
-              catch
-                _, _ -> nil
-              end
-            end)
-
-          if result != [] do
-            {:reply, result, state}
-          else
-            {:reply, [], state}
-          end
-        else
-          {:reply, [], state}
-        end
-    end
+    {:reply, results, state}
   end
 
   @impl true
@@ -397,7 +278,6 @@ defmodule RaRegistry.Manager do
         _error ->
           # Fall back to consistent_query
           case :ra.consistent_query(server_id, {:count, key, state.keys}) do
-            {:ok, count} -> {:reply, count, state}
             {:ok, count, _} -> {:reply, count, state}
             _ -> {:reply, 0, state}
           end
@@ -409,7 +289,6 @@ defmodule RaRegistry.Manager do
           other_member = Enum.find(state.members, fn m -> m != server_id end) || server_id
 
           case :ra.consistent_query(other_member, {:count, key, state.keys}) do
-            {:ok, count} -> {:reply, count, state}
             {:ok, count, _} -> {:reply, count, state}
             _ -> {:reply, 0, state}
           end
@@ -511,6 +390,11 @@ defmodule RaRegistry.Manager do
   end
 
   @impl true
+  def handle_info({_ref, {:error, :shutdown}}, state) do
+    {:noreply, state}
+  end
+
+  @impl true
   def handle_info({:EXIT, pid, reason}, state) do
     # Process EXIT messages - send process_down command to Ra
     # to clean up any registrations
@@ -551,21 +435,13 @@ defmodule RaRegistry.Manager do
 
     # First try to properly remove the member through Ra
     try do
-      task = Task.async(fn -> :ra.remove_member(server_id, failed_member) end)
+      case :ra.remove_member(server_id, failed_member) do
+        {:ok, _, _} ->
+          Logger.info("Successfully removed member #{inspect(failed_member)} from cluster")
 
-      case Task.yield(task, 5000) do
-        {:ok, {:ok, _, _}} ->
-          Logger.info("Successfully removed member #{inspect(node)} from cluster")
-
-        {:ok, error} ->
+        error ->
           Logger.warning("Standard removal of #{inspect(node)} failed: #{inspect(error)}")
           # If regular removal fails, try force delete as fallback
-          try_force_delete_member(failed_member)
-
-        nil ->
-          # Task timed out
-          Task.shutdown(task)
-          Logger.warning("Timeout removing member #{inspect(node)}")
           try_force_delete_member(failed_member)
       end
     catch
@@ -589,12 +465,14 @@ defmodule RaRegistry.Manager do
   @impl true
   def handle_info(:check_cluster_health, state) do
     # Schedule the next health check - more frequent checks for faster recovery
-    Process.send_after(self(), :check_cluster_health, 5_000)
+    Process.send_after(self(), :check_cluster_health, 10_000)
 
     server_id = {state.cluster_name, node()}
 
-    case :ra.members(server_id) do
-      {:ok, members, _leader} ->
+    task = Task.async(fn -> :ra.members(server_id) end)
+
+    case Task.yield(task, 3_000) do
+      {:ok, {:ok, members, _leader}} ->
         # We got a response, check if our member list matches Ra's view
         current_members = MapSet.new(members)
         our_members = MapSet.new(state.members)
@@ -650,19 +528,12 @@ defmodule RaRegistry.Manager do
   defp get_leader(state) do
     server_id = {state.cluster_name, node()}
 
-    try do
-      task = Task.async(fn -> :ra.members(server_id) end)
+    case :ra.members(server_id) do
+      {:ok, _members, leader} when leader != nil ->
+        leader
 
-      case Task.yield(task, 2000) do
-        {:ok, {:ok, _members, leader}} when leader != nil ->
-          leader
-
-        _ ->
-          Task.shutdown(task)
-          nil
-      end
-    catch
-      _, _ -> nil
+      _ ->
+        nil
     end
   end
 
@@ -703,14 +574,8 @@ defmodule RaRegistry.Manager do
     if state.members != [] and state.members != [server_id] do
       other_member = Enum.find(state.members, fn m -> m != server_id end) || server_id
 
-      # Timeout the request to the other member too
-      task =
-        Task.async(fn ->
-          :ra.process_command(other_member, {:register, key, pid, value, state.keys})
-        end)
-
-      case Task.yield(task, 5000) do
-        {:ok, {:ok, :ok, _}} ->
+      case :ra.process_command(other_member, {:register, key, pid, value, state.keys}) do
+        {:ok, :ok, _} ->
           # Set up monitoring for this process if we're not already monitoring it
           updated_state =
             if !Map.has_key?(monitored_pids, pid) do
@@ -724,16 +589,11 @@ defmodule RaRegistry.Manager do
 
           {:reply, :ok, updated_state}
 
-        {:ok, {:ok, {:error, :already_registered}, _}} ->
+        {:ok, {:error, :already_registered}, _} ->
           {:reply, {:error, :already_registered}, state}
 
-        {:ok, error} ->
+        error ->
           {:reply, {:error, error}, state}
-
-        nil ->
-          # Task timed out
-          Task.shutdown(task)
-          {:reply, {:error, :cluster_timeout}, state}
       end
     else
       {:reply, {:error, :no_available_members}, state}
@@ -791,20 +651,13 @@ defmodule RaRegistry.Manager do
     Enum.each(other_members, fn member ->
       try do
         Logger.debug("Notifying #{inspect(member)} about removal of #{inspect(failed_member)}")
-        # Use a timeout to avoid getting stuck
-        task = Task.async(fn -> :ra.remove_member(member, failed_member) end)
 
-        case Task.yield(task, 5000) do
-          {:ok, {:ok, _, _}} ->
+        case :ra.remove_member(member, failed_member) do
+          {:ok, _, _} ->
             Logger.debug("Successfully notified #{inspect(member)}")
 
-          {:ok, error} ->
+          error ->
             Logger.warning("Error notifying #{inspect(member)}: #{inspect(error)}")
-
-          nil ->
-            # Task timed out
-            Task.shutdown(task)
-            Logger.warning("Timeout notifying #{inspect(member)}")
         end
       catch
         kind, reason ->
@@ -858,43 +711,26 @@ defmodule RaRegistry.Manager do
   defp do_lookup(key, state) do
     server_id = {state.cluster_name, node()}
 
-    # For read operations, we should use consistent_query to get the most up-to-date data
-    # across the entire cluster
-    try do
-      # First try a consistent query on our local node
-      case :ra.consistent_query(server_id, {:lookup, key, state.keys}) do
-        {:ok, {:ok, results}} ->
-          results
+    # Use proper Ra query format - module, function, arguments
+    # The function must accept state as its first argument
+    query_fun =
+      case state.keys do
+        :unique -> {RaRegistry.StateMachine, :lookup_query_unique, [key]}
+        :duplicate -> {RaRegistry.StateMachine, :lookup_query_duplicate, [key]}
+      end
 
+    try do
+      case :ra.consistent_query(server_id, query_fun) do
         {:ok, {:ok, results}, _} ->
           results
 
         _error ->
-          # If that fails, try to find another member to query
-          if state.members != [] and state.members != [server_id] do
-            # Find the leader if possible, otherwise use any other member
-            case :ra.members(server_id) do
-              {:ok, _members, leader} when leader != nil ->
-                # We have a leader, use it
-                case :ra.consistent_query(leader, {:lookup, key, state.keys}) do
-                  {:ok, {:ok, results}} -> results
-                  {:ok, {:ok, results}, _} -> results
-                  _ -> []
-                end
+          # try other member
+          other_member = Enum.find(state.members, fn m -> m != server_id end) || server_id
 
-              _ ->
-                # No leader identified, try another member
-                other_member = Enum.find(state.members, fn m -> m != server_id end) || server_id
-
-                case :ra.consistent_query(other_member, {:lookup, key, state.keys}) do
-                  {:ok, {:ok, results}} -> results
-                  {:ok, {:ok, results}, _} -> results
-                  _ -> []
-                end
-            end
-          else
-            # No other members, return empty results
-            []
+          case :ra.consistent_query(other_member, query_fun) do
+            {:ok, {:ok, results}, _} -> results
+            _ -> []
           end
       end
     rescue
@@ -935,7 +771,7 @@ defmodule RaRegistry.Manager do
 
           {:ok, updated_state}
 
-        {:ok, {:error, :already_registered}, _} ->
+        {:error, :already_registered} ->
           {:error, :already_registered}
 
         error ->
