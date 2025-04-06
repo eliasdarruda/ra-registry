@@ -19,6 +19,8 @@ Key features:
 
 Add `ra_registry` to your list of dependencies in `mix.exs`:
 
+STILL WIP
+
 ```elixir
 def deps do
   [
