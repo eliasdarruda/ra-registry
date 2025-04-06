@@ -1,6 +1,6 @@
 # RaRegistry
 
-A distributed registry for Elixir GenServers using [Ra](https://github.com/rabbitmq/ra) (RabbitMQ's Raft implementation).
+A distributed Registry for Elixir GenServers using [Ra](https://github.com/rabbitmq/ra) (RabbitMQ's Raft implementation).
 
 ## Overview
 
