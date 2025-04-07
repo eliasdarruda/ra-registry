@@ -37,6 +37,7 @@ defmodule MyApp do
   def start(_type, _args) do
     children = [
       # Start RaRegistry before any services that depend on it
+      # if you are using a clustering mechanism such as libcluster, make sure that this is added after it.
       {RaRegistry, keys: :unique, name: MyApp.Registry, ra_config: %{}}, # any additional :ra config that you want to override goes here
       
       # Other children in your supervision tree...
