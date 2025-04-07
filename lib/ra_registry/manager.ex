@@ -80,7 +80,7 @@ defmodule RaRegistry.Manager do
     end
 
     # Attempt to start the Ra cluster
-    case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
+    case :ra.start_or_restart_cluster(:default, cluster_name, machine, server_ids) do
       {:ok, started, _leader} ->
         Logger.info("RaRegistry started cluster with #{inspect(started)} nodes")
         {:ok, %{cluster_name: cluster_name, members: server_ids, keys: keys, name: name}}
@@ -390,11 +390,6 @@ defmodule RaRegistry.Manager do
   end
 
   @impl true
-  def handle_info({_ref, {:error, :shutdown}}, state) do
-    {:noreply, state}
-  end
-
-  @impl true
   def handle_info({:EXIT, pid, reason}, state) do
     # Process EXIT messages - send process_down command to Ra
     # to clean up any registrations
@@ -497,6 +492,13 @@ defmodule RaRegistry.Manager do
 
         {:noreply, state}
     end
+  end
+
+  @impl true
+  def handle_info(unhandled_message, state) do
+    Logger.debug("Unhandled message: #{inspect(unhandled_message)}")
+
+    {:noreply, state}
   end
 
   @impl true
