@@ -12,7 +12,7 @@ Key features:
 - Built on Ra, RabbitMQ's implementation of the Raft consensus protocol
 - Regular operations with strong consistency during normal cluster operation
 - Familiar API similar to Elixir's built-in Registry
-- Enhanced recovery mechanisms for handling SIGKILL scenarios
+- Enhanced recovery mechanisms for handling abrupt node down scenarios like SIGKILL
 - Seamless integration with GenServer via the `:via` tuple registration
 
 ## Installation
@@ -29,15 +29,7 @@ def deps do
 end
 ```
 
-## Configuration
-
-Configure the Ra cluster in your application configuration:
-
-```elixir
-config :ra_registry, cluster_name: :my_registry_cluster
-```
-
-## Usage with GenServer (Recommended)
+## Usage
 
 The most common and recommended way to use RaRegistry is with GenServer via the `:via` tuple registration. This ensures your GenServers can be discovered across all nodes in your cluster:
 
@@ -47,7 +39,7 @@ defmodule MyApp do
   def start(_type, _args) do
     children = [
       # Start RaRegistry before any services that depend on it
-      {RaRegistry, keys: :unique, name: MyApp.Registry},
+      {RaRegistry, keys: :unique, name: MyApp.Registry, ra_config: %{}}, # any additional :ra config that you want to override goes here
       
       # Other children in your supervision tree...
     ]
@@ -86,6 +78,9 @@ end
 # This call will work from any node in the cluster
 MyApp.Server.call("user_123", {:set, :name, "John"})
 MyApp.Server.call("user_123", {:get, :name}) # => "John"
+
+# Should return already started regardless of the node you try to start the Server
+{:error, {:already_started, ^pid}} = MyApp.Server.start_link(id: "user_123")
 ```
 
 ## Direct API Usage
@@ -114,43 +109,21 @@ RaRegistry.count(DuplicateRegistry, "shared_key") # => 2
 
 # Unregister processes
 RaRegistry.unregister(MyRegistry, "unique_key")
+
+# Using update value, first register it
+:ok = RaRegistry.register(MyRegistry, "key_update", 1)
+
+# Now update it
+{:ok, 2} = RaRegistry.update_value(MyRegistry, "key_update", fn val -> val + 1 end)
 ```
 
-## Integration in Supervision Tree
-
-To properly integrate RaRegistry in your application, add it to your supervision tree:
-
-```elixir
-# In your application.ex file:
-def start(_type, _args) do
-  children = [
-    # Start RaRegistry with your desired configuration
-    {RaRegistry, keys: :unique, name: MyApp.Registry},
-    
-    # Other services that depend on RaRegistry
-    MyApp.SomeService,
-    {MyApp.WorkerSupervisor, registry: MyApp.Registry}
-  ]
-
-  # Use a supervision strategy that matches your needs
-  opts = [strategy: :one_for_one, name: MyApp.Supervisor]
-  Supervisor.start_link(children, opts)
-end
-```
-
-## Cluster Management
+## Debbuging
 
 You can manage the RaRegistry cluster using these functions:
 
 ```elixir
 # Get current cluster members
 RaRegistry.Manager.get_members(MyApp.Registry)
-
-# Add a node to the cluster
-RaRegistry.Manager.add_member(MyApp.Registry, :"node2@host")
-
-# Remove a node from the cluster
-RaRegistry.Manager.remove_member(MyApp.Registry, :"node2@host")
 ```
 
 ## Consistency and Recovery

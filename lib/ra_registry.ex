@@ -10,14 +10,6 @@ defmodule RaRegistry do
 
   ## Usage
 
-  First, set up the cluster in your application configuration:
-
-  ```elixir
-  config :ra_registry, cluster_name: :my_registry_cluster
-  ```
-
-  Then use the registry in your code:
-
   ```elixir
   # Register a process with a unique key
   RaRegistry.register(:my_registry, "unique_key", :some_value)
@@ -53,8 +45,7 @@ defmodule RaRegistry do
 
   ## Options
 
-  * `:keys` - The kind of keys in this registry. Can be either `:unique` or
-    `:duplicate` (required).
+  * `:keys` - The kind of keys in this registry. Can be either `:unique` or `:duplicate` (required).
   * `:name` - A local or global name for the registry (required).
 
   ## Examples
@@ -167,25 +158,10 @@ defmodule RaRegistry do
   def register_name({registry, key}, pid) do
     # For compatibility with GenServer :via
     # We must use the provided pid, not self()
-    # Add a retry with exponential backoff for reliability during tests
-    do_register_name({registry, key}, pid, 3)
-  end
-
-  # Helper with retry logic for more reliable via registration during tests
-  defp do_register_name({registry, key}, pid, retries) when retries > 0 do
     case register(registry, key, nil, pid) do
-      :ok ->
-        :yes
-
-      _ ->
-        # Sleep with exponential backoff
-        Process.sleep(500 * 2 ** (3 - retries))
-        do_register_name({registry, key}, pid, retries - 1)
+      :ok -> :yes
+      _ -> :no
     end
-  end
-
-  defp do_register_name({_registry, _key}, _pid, 0) do
-    :no
   end
 
   @doc """
