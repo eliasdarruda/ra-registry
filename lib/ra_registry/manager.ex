@@ -47,16 +47,6 @@ defmodule RaRegistry.Manager do
     # Ensure Ra application is started
     Application.ensure_all_started(:ra)
 
-    # Make sure the Ra system is started
-    :ra_system.start_default()
-
-    # Initialize Ra with the registry state machine
-    # Ra 2.x uses {:module, ModuleName, initial_state} format
-    machine = RaRegistry.StateMachine.machine_config()
-
-    # Setup recurring health check timer
-    Process.send_after(self(), :check_cluster_health, 11_000)
-
     # Ra configuration
     # 1) Increase default timeout to allow for more time
     # 2) Decrease election timeout for faster leader election after failures
@@ -79,8 +69,17 @@ defmodule RaRegistry.Manager do
       Application.put_env(:ra, key, value)
     end
 
-    # Attempt to start the Ra cluster
-    case :ra.start_or_restart_cluster(:default, cluster_name, machine, server_ids) do
+    # Make sure the Ra system is started
+    :ra_system.start_default()
+
+    # Initialize Ra with the registry state machine
+    # Ra 2.x uses {:module, ModuleName, initial_state} format
+    machine = RaRegistry.StateMachine.machine_config()
+
+    # Setup recurring health check timer
+    Process.send_after(self(), :check_cluster_health, 11_000)
+
+    case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
       {:ok, started, _leader} ->
         Logger.info("RaRegistry started cluster with #{inspect(started)} nodes")
         {:ok, %{cluster_name: cluster_name, members: server_ids, keys: keys, name: name}}
@@ -182,12 +181,6 @@ defmodule RaRegistry.Manager do
 
         {:ok, {:error, :already_registered}, _} ->
           {:reply, {:error, :already_registered}, state}
-
-        nil ->
-          Logger.warning("COMMAND TIMEOUT - Cluster appears stuck, initiating emergency recovery")
-
-          # Fall back to another member while recovery happens
-          retry_with_fallback_member(key, pid, value, state)
 
         error ->
           # Try to recover the cluster if we get a timeout or leadership issue
@@ -418,7 +411,7 @@ defmodule RaRegistry.Manager do
   @impl true
   def handle_info({:nodeup, node, _node_type}, state) do
     server_id = {state.cluster_name, node()}
-    :ra.add_member(server_id, {state.cluster_name, node})
+    :ra.add_member(server_id, {state.cluster_name, node}) |> dbg()
 
     {:noreply, state}
   end
@@ -606,7 +599,6 @@ defmodule RaRegistry.Manager do
   defp is_timeout_error(error) do
     case error do
       {:timeout, _} -> true
-      {:badrpc, :timeout} -> true
       {:error, :timeout} -> true
       {:error, :noproc} -> true
       _ -> false
@@ -673,7 +665,6 @@ defmodule RaRegistry.Manager do
   # Handle a failed/timeout command by checking if we need to clean up members
   defp handle_node_failure(node, state) do
     failed_member = {state.cluster_name, node}
-    _server_id = {state.cluster_name, node()}
 
     # Force remove the failed node from local membership
     new_members =
