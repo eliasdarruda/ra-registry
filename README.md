@@ -17,9 +17,7 @@ Key features:
 
 ## Installation
 
-Add `ra_registry` to your list of dependencies in `mix.exs`:
-
-STILL WIP
+The package can be installed by adding `ra_registry` to your list of dependencies in `mix.exs`:
 
 ```elixir
 def deps do
@@ -117,7 +115,7 @@ RaRegistry.unregister(MyRegistry, "unique_key")
 {:ok, 2} = RaRegistry.update_value(MyRegistry, "key_update", fn val -> val + 1 end)
 ```
 
-## Debbuging
+## Debugging
 
 You can manage the RaRegistry cluster using these functions:
 

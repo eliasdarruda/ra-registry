@@ -10,7 +10,7 @@ defmodule RaRegistry.MixProject do
       deps: deps(),
       description: description(),
       package: package(),
-      source_url: "https://github.com/yourusername/ra_registry"
+      source_url: "https://github.com/eliasdarruda/ra-registry"
     ]
   end
 
@@ -34,7 +34,8 @@ defmodule RaRegistry.MixProject do
   defp package do
     [
       licenses: ["Apache-2.0"],
-      links: %{"GitHub" => "https://github.com/yourusername/ra_registry"}
+      links: %{"GitHub" => "https://github.com/eliasdarruda/ra-registry"},
+      maintainers: ["eliasdarruda"]
     ]
   end
 end
