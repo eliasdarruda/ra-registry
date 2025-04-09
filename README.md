@@ -37,7 +37,8 @@ defmodule MyApp do
   def start(_type, _args) do
     children = [
       # Start RaRegistry before any services that depend on it
-      {RaRegistry, keys: :unique, name: MyApp.Registry, ra_config: %{}}, # any additional :ra config that you want to override goes here
+      # You can configure any configuration related with the :ra cluster under ra_config.
+      {RaRegistry, keys: :unique, name: MyApp.Registry, ra_config: %{data_dir: ~c"/tmp/ra"}},
       
       # Other children in your supervision tree...
     ]
@@ -149,6 +150,23 @@ RaRegistry includes specialized recovery mechanisms to handle various failure sc
 - Cleanup of dead process registrations
 
 For critical systems, we recommend running at least 3 nodes to ensure quorum is maintained even if one node fails. This allows the system to continue operating consistently during most types of failures.
+
+## Benchmarks
+
+The project includes comprehensive benchmarks for performance evaluation:
+
+```elixir
+# Run all benchmarks
+mix run benchmarks/run_all.exs
+
+# Or run individual benchmarks:
+mix run benchmarks/registry_bench.exs
+mix run benchmarks/comparison_bench.exs
+```
+
+These benchmarks test various operations like register, lookup, and unregister with different workloads and concurrency levels. The comparison benchmarks help understand the performance tradeoffs between RaRegistry and Elixir's built-in Registry.
+
+Note that RaRegistry is optimized for distributed consistency rather than raw performance. The built-in Registry will typically perform faster in a single-node environment, while RaRegistry provides the benefit of strong consistency across a cluster.
 
 ## License
 
