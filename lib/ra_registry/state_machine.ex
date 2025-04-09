@@ -40,12 +40,15 @@ defmodule RaRegistry.StateMachine do
         %{unique: unique, duplicate: _} = state
       ) do
     case unique do
-      %{^key => {_pid, _value}} ->
-        {state, {:error, :already_registered}}
+      %{^key => {stored_pid, _value}} ->
+        # make sure to validate if current process is alive, if not, just replace it
+        if distributed_alive?(stored_pid) do
+          {state, {:error, :already_registered}}
+        else
+          {%{state | unique: Map.put(unique, key, {pid, value})}, :ok}
+        end
 
       _ ->
-        # In a real implementation, Ra would handle process monitoring
-        # For testing purposes, we're simplifying the implementation
         {%{state | unique: Map.put(unique, key, {pid, value})}, :ok}
     end
   end
@@ -56,9 +59,6 @@ defmodule RaRegistry.StateMachine do
         %{unique: _, duplicate: duplicate} = state
       ) do
     entries = Map.get(duplicate, key, %{})
-
-    # In a real implementation, Ra would handle process monitoring
-    # For testing purposes, we're simplifying the implementation
 
     new_entries = Map.put(entries, pid, value)
     {%{state | duplicate: Map.put(duplicate, key, new_entries)}, :ok}
@@ -208,4 +208,19 @@ defmodule RaRegistry.StateMachine do
     # Apply process_down command to remove entries for the terminated process
     command_handler(nil, {:process_down, pid}, state)
   end
+
+  defp distributed_alive?(pid) when is_pid(pid) do
+    owner_node = node(pid)
+    self = Node.self()
+
+    if owner_node == self do
+      Process.alive?(pid)
+    else
+      :erpc.call(owner_node, Process, :alive?, [pid])
+    end
+  rescue
+    _ -> false
+  end
+
+  defp distributed_alive?(_pid), do: false
 end

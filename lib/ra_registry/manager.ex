@@ -136,11 +136,6 @@ defmodule RaRegistry.Manager do
               {:ok, %{cluster_name: cluster_name, members: server_ids, keys: keys, name: name}}
             end
         end
-
-      error ->
-        Logger.error("Failed to start Ra cluster: #{inspect(error)}")
-        # For tests, we still want to return success to avoid cascading failures
-        {:ok, %{cluster_name: cluster_name, members: server_ids, keys: keys, name: name}}
     end
   end
 
@@ -411,7 +406,7 @@ defmodule RaRegistry.Manager do
   @impl true
   def handle_info({:nodeup, node, _node_type}, state) do
     server_id = {state.cluster_name, node()}
-    :ra.add_member(server_id, {state.cluster_name, node}) |> dbg()
+    :ra.add_member(server_id, {state.cluster_name, node})
 
     {:noreply, state}
   end
@@ -609,7 +604,6 @@ defmodule RaRegistry.Manager do
   defp extract_failed_node_from_error(error) do
     case error do
       {:timeout, {_cluster_name, node}} -> node
-      {:badrpc, :timeout, node} -> node
       _ -> nil
     end
   end
@@ -808,12 +802,7 @@ defmodule RaRegistry.Manager do
 
     try do
       # Try to find the leader for more reliable writes
-      leader =
-        case :ra.members(server_id) do
-          {:ok, _members, leader_id} when leader_id != nil -> leader_id
-          # Fall back to local node if leader unknown
-          _ -> server_id
-        end
+      leader = get_leader(state)
 
       # Send the unregister command to the leader when possible
       case :ra.process_command(leader, {:unregister, key, pid, state.keys}) do

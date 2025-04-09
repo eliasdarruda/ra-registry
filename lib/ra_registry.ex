@@ -119,6 +119,13 @@ defmodule RaRegistry do
   """
   def lookup(name, key) do
     GenServer.call(name, {:lookup, key})
+    |> Enum.filter(fn
+      {pid, _value} when is_pid(pid) ->
+        distributed_alive?(pid)
+
+      _value ->
+        true
+    end)
   end
 
   @doc """
@@ -202,4 +209,19 @@ defmodule RaRegistry do
         pid
     end
   end
+
+  defp distributed_alive?(pid) when is_pid(pid) do
+    owner_node = node(pid)
+    self = Node.self()
+
+    if owner_node == self do
+      Process.alive?(pid)
+    else
+      :erpc.call(owner_node, Process, :alive?, [pid])
+    end
+  rescue
+    _ -> false
+  end
+
+  defp distributed_alive?(_pid), do: false
 end
