@@ -1,6 +1,6 @@
 # RaRegistry
 
-A distributed Registry for Elixir using [Ra](https://github.com/rabbitmq/ra) (RabbitMQ's Raft implementation).
+A distributed Registry for Elixir GenServers using [Ra](https://github.com/rabbitmq/ra) (RabbitMQ's Raft implementation).
 
 ## Overview
 
@@ -22,7 +22,7 @@ The package can be installed by adding `ra_registry` to your list of dependencie
 ```elixir
 def deps do
   [
-    {:ra_registry, "~> 0.1.0"}
+    {:ra_registry, "~> 0.1"}
   ]
 end
 ```
@@ -37,7 +37,6 @@ defmodule MyApp do
   def start(_type, _args) do
     children = [
       # Start RaRegistry before any services that depend on it
-      # if you are using a clustering mechanism such as libcluster, make sure that this is added after it.
       {RaRegistry, keys: :unique, name: MyApp.Registry, ra_config: %{}}, # any additional :ra config that you want to override goes here
       
       # Other children in your supervision tree...
@@ -154,3 +153,4 @@ For critical systems, we recommend running at least 3 nodes to ensure quorum is 
 ## License
 
 Apache License 2.0
+
