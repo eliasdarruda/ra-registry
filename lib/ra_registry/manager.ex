@@ -30,10 +30,13 @@ defmodule RaRegistry.Manager do
     # Extract options
     keys = Keyword.fetch!(opts, :keys)
     name = Keyword.fetch!(opts, :name)
-    nodes = Node.list() ++ [Node.self()]
     ra_config = Keyword.get(opts, :ra_config, %{})
-
     cluster_name = :"#{name}.RaCluster"
+    wait_for_nodes_range = Keyword.get(opts, :wait_for_nodes_range_ms, 3000..4000)
+
+    Process.sleep(Enum.random(wait_for_nodes_range))
+
+    nodes = Node.list() ++ [Node.self()]
 
     # Each server needs a unique ID in the format {name, node}
     server_ids =
@@ -151,64 +154,21 @@ defmodule RaRegistry.Manager do
   end
 
   @impl true
-  def handle_call({:register, key, pid, value}, _from, state) do
-    # Get the current monitored processes map or initialize it
-    monitored_pids = Map.get(state, :monitored_pids, %{})
+  def handle_call({:register, key, pid, value}, from, state) do
+    parent_pid = self()
 
-    try do
-      leader_id = get_leader(state)
+    spawn(fn ->
+      case do_register(key, pid, value, state) do
+        {:ok, _state} ->
+          Process.send(parent_pid, {:monitor, pid}, [])
+          GenServer.reply(from, :ok)
 
-      # Reduced timeout to fail faster
-      case :ra.process_command(leader_id, {:register, key, pid, value, state.keys}) do
-        {:ok, :ok, _} ->
-          # Set up monitoring for this process if we're not already monitoring it
-          updated_state =
-            if !Map.has_key?(monitored_pids, pid) do
-              # Start monitoring the process
-              ref = Process.monitor(pid)
-              new_monitored = Map.put(monitored_pids, pid, ref)
-              Map.put(state, :monitored_pids, new_monitored)
-            else
-              state
-            end
-
-          {:reply, :ok, updated_state}
-
-        {:ok, {:error, :already_registered}, _} ->
-          {:reply, {:error, :already_registered}, state}
-
-        error ->
-          # Try to recover the cluster if we get a timeout or leadership issue
-          if is_timeout_error(error) do
-            Logger.warning(
-              "Timeout while registering: #{inspect(error)}, attempting emergency recovery"
-            )
-
-            # Extract failed node from error if possible
-            failed_node = extract_failed_node_from_error(error)
-
-            new_state =
-              if failed_node do
-                handle_node_failure(failed_node, state)
-              else
-                state
-              end
-
-            # Retry with fallback member
-            retry_with_fallback_member(key, pid, value, new_state)
-          else
-            {:reply, {:error, error}, state}
-          end
+        {:error, _error} = result ->
+          GenServer.reply(from, result)
       end
-    rescue
-      error ->
-        Logger.warning(
-          "Exception during registration: #{inspect(error)}, initiating emergency recovery"
-        )
+    end)
 
-        # Try fallback while recovery happens
-        retry_with_fallback_member(key, pid, value, state)
-    end
+    {:noreply, state}
   end
 
   @impl true
@@ -247,10 +207,14 @@ defmodule RaRegistry.Manager do
   end
 
   @impl true
-  def handle_call({:lookup, key}, _from, state) do
-    results = do_lookup(key, state)
+  def handle_call({:lookup, key}, from, state) do
+    spawn(fn ->
+      results = do_lookup(key, state)
 
-    {:reply, results, state}
+      GenServer.reply(from, results)
+    end)
+
+    {:noreply, state}
   end
 
   @impl true
@@ -315,24 +279,6 @@ defmodule RaRegistry.Manager do
       _ ->
         {:reply, {:error, :not_owner}, state}
     end
-  end
-
-  @impl true
-  def handle_call({:match, key, pattern}, _from, state) do
-    # First lookup all values for this key
-    results = do_lookup(key, state)
-
-    # Filter the results based on the pattern
-    matches =
-      Stream.filter(results, fn {_pid, value} ->
-        try do
-          match?(^pattern, value)
-        rescue
-          _ -> false
-        end
-      end)
-
-    {:reply, matches, state}
   end
 
   # All handle_info implementations grouped together
@@ -447,15 +393,13 @@ defmodule RaRegistry.Manager do
 
   @impl true
   def handle_info(:check_cluster_health, state) do
-    # Schedule the next health check - more frequent checks for faster recovery
-    Process.send_after(self(), :check_cluster_health, 10_000)
-
     server_id = {state.cluster_name, node()}
 
-    task = Task.async(fn -> :ra.members(server_id) end)
+    case :ra.members(server_id) do
+      {:ok, members, _leader} ->
+        # Schedule the next health check - more frequent checks for faster recovery
+        Process.send_after(self(), :check_cluster_health, 10_000)
 
-    case Task.yield(task, 3_000) do
-      {:ok, {:ok, members, _leader}} ->
         # We got a response, check if our member list matches Ra's view
         current_members = MapSet.new(members)
         our_members = MapSet.new(state.members)
@@ -473,6 +417,9 @@ defmodule RaRegistry.Manager do
         end
 
       _ ->
+        # Schedule the next health check - more frequent checks for faster recovery
+        Process.send_after(self(), :check_cluster_health, 10_000)
+
         Logger.warning("Health check failed, attempting recovery")
 
         # No other members available, try to trigger leader election for future attempts
@@ -480,6 +427,23 @@ defmodule RaRegistry.Manager do
 
         {:noreply, state}
     end
+  end
+
+  @impl true
+  def handle_info({:monitor, pid}, state) do
+    monitored_pids = Map.get(state, :monitored_pids, %{})
+
+    updated_state =
+      if !Map.has_key?(monitored_pids, pid) do
+        # Start monitoring the process
+        ref = Process.monitor(pid)
+        new_monitored = Map.put(monitored_pids, pid, ref)
+        Map.put(state, :monitored_pids, new_monitored)
+      else
+        state
+      end
+
+    {:noreply, updated_state}
   end
 
   @impl true
@@ -555,59 +519,6 @@ defmodule RaRegistry.Manager do
     end)
   end
 
-  # Helper to retry register operation with a fallback member
-  defp retry_with_fallback_member(key, pid, value, state) do
-    server_id = {state.cluster_name, node()}
-    monitored_pids = Map.get(state, :monitored_pids, %{})
-
-    # Use any other cluster member if available
-    if state.members != [] and state.members != [server_id] do
-      other_member = Enum.find(state.members, fn m -> m != server_id end) || server_id
-
-      case :ra.process_command(other_member, {:register, key, pid, value, state.keys}) do
-        {:ok, :ok, _} ->
-          # Set up monitoring for this process if we're not already monitoring it
-          updated_state =
-            if !Map.has_key?(monitored_pids, pid) do
-              # Start monitoring the process
-              ref = Process.monitor(pid)
-              new_monitored = Map.put(monitored_pids, pid, ref)
-              Map.put(state, :monitored_pids, new_monitored)
-            else
-              state
-            end
-
-          {:reply, :ok, updated_state}
-
-        {:ok, {:error, :already_registered}, _} ->
-          {:reply, {:error, :already_registered}, state}
-
-        error ->
-          {:reply, {:error, error}, state}
-      end
-    else
-      {:reply, {:error, :no_available_members}, state}
-    end
-  end
-
-  # Check if an error is timeout-related
-  defp is_timeout_error(error) do
-    case error do
-      {:timeout, _} -> true
-      {:error, :timeout} -> true
-      {:error, :noproc} -> true
-      _ -> false
-    end
-  end
-
-  # Try to extract the failed node from an error message
-  defp extract_failed_node_from_error(error) do
-    case error do
-      {:timeout, {_cluster_name, node}} -> node
-      _ -> nil
-    end
-  end
-
   # Handles recovery from node failures by attempting to force delete the server
   defp try_force_delete_member(member) do
     try do
@@ -654,26 +565,6 @@ defmodule RaRegistry.Manager do
           )
       end
     end)
-  end
-
-  # Handle a failed/timeout command by checking if we need to clean up members
-  defp handle_node_failure(node, state) do
-    failed_member = {state.cluster_name, node}
-
-    # Force remove the failed node from local membership
-    new_members =
-      Enum.reject(state.members, fn m ->
-        case m do
-          {_cluster_name, ^node} -> true
-          _ -> false
-        end
-      end)
-
-    # Try to update other nodes about membership change
-    notify_other_members_about_removal(new_members, failed_member, state.cluster_name)
-
-    # Update local state
-    %{state | members: new_members}
   end
 
   # Helper to clean up process monitoring
@@ -735,12 +626,7 @@ defmodule RaRegistry.Manager do
 
     try do
       # Try to find the leader for more reliable writes
-      leader =
-        case :ra.members(server_id) do
-          {:ok, _members, leader_id} when leader_id != nil -> leader_id
-          # Fall back to local node if leader unknown
-          _ -> server_id
-        end
+      leader = get_leader(state)
 
       # Send the registration command to the leader when possible
       case :ra.process_command(leader, {:register, key, pid, value, state.keys}) do
@@ -758,7 +644,7 @@ defmodule RaRegistry.Manager do
 
           {:ok, updated_state}
 
-        {:error, :already_registered} ->
+        {:ok, {:error, :already_registered}, _} ->
           {:error, :already_registered}
 
         error ->

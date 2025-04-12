@@ -34,8 +34,13 @@ defmodule RaRegistryTest do
     IO.puts("Ra member status for #{inspect(server_id)}: #{inspect(:ra.members(server_id))}")
 
     # Set up test registries with a wait between them
-    RaRegistry.start_link(keys: :unique, name: UniqueRegistry)
-    RaRegistry.start_link(keys: :duplicate, name: DuplicateRegistry)
+    RaRegistry.start_link(keys: :unique, name: UniqueRegistry, wait_for_nodes_range_ms: 1..2)
+
+    RaRegistry.start_link(
+      keys: :duplicate,
+      name: DuplicateRegistry,
+      wait_for_nodes_range_ms: 1..2
+    )
 
     # Try to register something directly to check if the system is working
     test_result = RaRegistry.register(UniqueRegistry, "_test_startup_key", "test_value")
@@ -146,6 +151,9 @@ defmodule RaRegistryTest do
         end)
 
       assert :ok = RaRegistry.register(DuplicateRegistry, "key1", :value1)
+
+      # wait for a bit to lookup
+      Process.sleep(100)
 
       # Look up should find both processes
       result = RaRegistry.lookup(DuplicateRegistry, "key1")

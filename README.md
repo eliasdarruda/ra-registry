@@ -38,7 +38,13 @@ defmodule MyApp do
     children = [
       # Start RaRegistry before any services that depend on it
       # You can configure any configuration related with the :ra cluster under ra_config.
-      {RaRegistry, keys: :unique, name: MyApp.Registry, ra_config: %{data_dir: ~c"/tmp/ra"}},
+      # wait for nodes range ms is a random range between two milliseconds values to ensure nodes are properly connected
+      {
+        RaRegistry,
+        keys: :unique,
+        name: MyApp.Registry,
+        ra_config: %{data_dir: ~c"/tmp/ra"}, wait_for_nodes_range_ms: 3000..5000
+      },
       
       # Other children in your supervision tree...
     ]
@@ -52,10 +58,7 @@ defmodule MyApp.Server do
   use GenServer
   
   def start_link(opts) do
-    id = Keyword.fetch!(opts, :id)
-    initial_state = Keyword.get(opts, :initial_state, %{})
-    
-    GenServer.start_link(__MODULE__, initial_state, name: via_tuple(id))
+    GenServer.start_link(__MODULE__, [], name: {:via, RaRegistry, {MyApp.Registry, opts[:id]}})
   end
   
   def call(id, message) do
