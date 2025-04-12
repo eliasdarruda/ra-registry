@@ -43,7 +43,8 @@ defmodule MyApp do
         RaRegistry,
         keys: :unique,
         name: MyApp.Registry,
-        ra_config: %{data_dir: ~c"/tmp/ra"}, wait_for_nodes_range_ms: 3000..5000
+        ra_config: %{data_dir: ~c"/tmp/ra"},
+        wait_for_nodes_range_ms: 3000..5000
       },
       
       # Other children in your supervision tree...
