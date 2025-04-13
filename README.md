@@ -59,7 +59,7 @@ defmodule MyApp.Server do
   use GenServer
   
   def start_link(opts) do
-    GenServer.start_link(__MODULE__, [], name: {:via, RaRegistry, {MyApp.Registry, opts[:id]}})
+    GenServer.start_link(__MODULE__, [], name: via_tuple(opts[:id]))
   end
   
   def call(id, message) do
