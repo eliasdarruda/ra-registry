@@ -137,12 +137,11 @@ RaRegistry offers these consistency guarantees:
 
 - **Normal Operation**: Operations use the Raft consensus protocol via Ra, providing strong consistency when a majority of nodes are available
 - **State Machine Atomicity**: Operations within the Ra state machine are atomic and either fully succeed or have no effect
-- **Best-Effort Recovery**: During failure scenarios like SIGKILL of the leader, our implementation employs aggressive recovery mechanisms that prioritize availability and eventual recovery
+- **Best-Effort Recovery**: During failure scenarios like SIGKILL of the leader, our implementation employs aggressive recovery mechanisms that prioritize cluster recovery
 
 It's important to understand that:
-- The custom recovery mechanisms we've implemented extend beyond the standard Raft protocol
-- During severe failures, the implementation might briefly prioritize availability over strict consistency
-- After recovery, the system returns to a consistent state, though some in-flight operations might be lost
+- The custom recovery mechanisms we’ve implemented extend beyond the standard Raft protocol.
+- After recovery, the system returns to a consistent state, though some in-flight operations might result in errors due to incomplete execution,
 
 ### Recovery Capabilities
 
